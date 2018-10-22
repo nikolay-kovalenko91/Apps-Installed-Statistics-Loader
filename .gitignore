@@ -1,0 +1,30 @@
+# Virutalenv, installed Python and Node modules and directories
+.env
+/local
+/lib
+/lib64
+/bin
+/include
+/share
+/node_modules
+/public
+/restkit
+/socketpool
+/ghostdriver.log
+/selenium
+/myvenv
+__pycache__
+*.pyc
+
+# Developer tools
+.DS_Store
+.svn
+.idea
+.directory
+.vscode
+.history
+geckodriver.log
+
+# Local files and logging
+PD-HW12-MemcLoad_v2.iml
+/sandbox

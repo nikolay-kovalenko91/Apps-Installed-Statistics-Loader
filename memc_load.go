@@ -7,31 +7,10 @@ import (
 	"io"
 	"log"
 	"os"
-	"strings"
+	"path/filepath"
 )
 
-var gz_path = "./sandbox/sample.txt.gz"
-var folder_path = "./sandbox"
-
-func getDirFiles(path string) []string {
-	dir, err := os.Open(path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer dir.Close()
-
-	fileInfos, err := dir.Readdir(-1)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	var filesNames []string
-	for _, fileInfo := range fileInfos {
-		filesNames = append(filesNames, fileInfo.Name())
-	}
-
-	return filesNames
-}
+var files_pattern = "./sandbox/*.tsv.gz"
 
 func readFile(path string) <-chan string {
 	output := make(chan string)
@@ -68,14 +47,22 @@ func readFile(path string) <-chan string {
 }
 
 func main() {
-	for _, line := range getDirFiles(folder_path) {
-		// TODO: use regexp here
-		if strings.Contains(line, "tsv") {
-			fmt.Println(line)
-		}
+	files_matches, err := filepath.Glob(files_pattern)
+	if err != nil {
+		log.Fatal(err)
 	}
 
-	for line := range readFile(gz_path) {
-		fmt.Println(line)
+	for _, file_name := range files_matches {
+		for line := range readFile(file_name) {
+			fmt.Printf(line)
+		}
+		fmt.Println()
 	}
 }
+
+// Todo: Parse tsv string to get data
+// Todo: Load it to Redis
+// Todo: Pass options to the script
+// Todo: Count errors while files processing
+// Todo: Implement reconnect / timeouts for Redis
+// Todo: Apply concurrency

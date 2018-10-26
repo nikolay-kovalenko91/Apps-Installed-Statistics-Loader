@@ -24,22 +24,31 @@ type AppInstalled struct {
 	apps    []int
 }
 
-func readFile(path string) (<-chan string, error) {
+// TEST TOOL
+func ToSlice(c chan interface{}) []interface{} {
+	s := make([]interface{}, 0)
+	for i := range c {
+		s = append(s, i)
+	}
+	return s
+}
+
+func readFile(path string) (<-chan string, <-chan error, error) {
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer file.Close()
 
 	// TODO: how to pass differnt unpackers as an argument?
 	unpacked, err := gzip.NewReader(file)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer unpacked.Close()
 
-	output := make(chan string)
-	errs := make(chan error)
+	linesRead := make(chan string)
+	readingErrs := make(chan error)
 	go func() {
 		reader := bufio.NewReader(unpacked)
 		for {
@@ -48,20 +57,16 @@ func readFile(path string) (<-chan string, error) {
 				if err == io.EOF {
 					break
 				} else {
-					errs <- err
+					readingErrs <- err
 				}
 			}
-			output <- line
+			linesRead <- line
 		}
-		close(errs)
-		close(output)
+		close(readingErrs)
+		close(linesRead)
 	}()
 
-	if err, open := <-errs; open {
-		return nil, err
-	}
-
-	return output, nil
+	return linesRead, readingErrs, nil
 }
 
 func parseTsvString(line string) (*AppInstalled, error) {
@@ -72,7 +77,7 @@ func parseTsvString(line string) (*AppInstalled, error) {
 
 	fieldsNumber := appInstalledValue.NumField()
 	if len(lineParts) != fieldsNumber {
-		return appInstalled, errors.New("file string has wrong format: can not parse it")
+		return appInstalled, errors.New("File string has wrong format: can not parse it")
 	}
 
 	// TODO: parse it with assigning automatically
@@ -94,20 +99,37 @@ func parseTsvString(line string) (*AppInstalled, error) {
 
 func handleFile(filesNames []string) {
 	for _, fileName := range filesNames {
-		lines, err := readFile(fileName)
+		fmt.Println("REDING", fileName)
+		lines, readingErrs, err := readFile(fileName)
 		if err != nil {
 			log.Fatal(err)
 			continue
 		}
-
-		for line := range lines {
-			appInstalled, err := parseTsvString(line)
-			if err != nil {
-				log.Fatal(err)
+		for {
+			select {
+			case line, ok := <-lines:
+				if ok {
+					fmt.Println(line)
+					//appInstalled, err := parseTsvString(line)
+					//if err != nil {
+					//	log.Fatal(err)
+					//}
+					//fmt.Printf("%+v\n", appInstalled)
+				} else {
+					lines = nil
+				}
+			case err, ok := <-readingErrs:
+				if ok {
+					log.Printf("Error reading file %s: %s", fileName, err)
+				} else {
+					readingErrs = nil
+				}
 			}
-			fmt.Printf("%+v\n", appInstalled)
+
+			if lines == nil && readingErrs == nil {
+				break
+			}
 		}
-		fmt.Println()
 	}
 }
 

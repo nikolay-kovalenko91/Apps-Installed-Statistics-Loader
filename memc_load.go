@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"errors"
 	"fmt"
+	"github.com/mediocregopher/radix.v2/pool"
 	"io"
 	"log"
 	"os"
@@ -24,31 +25,21 @@ type AppInstalled struct {
 	apps    []int
 }
 
-// TEST TOOL
-func ToSlice(c chan interface{}) []interface{} {
-	s := make([]interface{}, 0)
-	for i := range c {
-		s = append(s, i)
-	}
-	return s
-}
-
 func readFile(path string) (<-chan string, <-chan error, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer file.Close()
 
 	// TODO: how to pass differnt unpackers as an argument?
 	unpacked, err := gzip.NewReader(file)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer unpacked.Close()
 
 	linesRead := make(chan string)
 	readingErrs := make(chan error)
+
 	go func() {
 		reader := bufio.NewReader(unpacked)
 		for {
@@ -62,14 +53,17 @@ func readFile(path string) (<-chan string, <-chan error, error) {
 			}
 			linesRead <- line
 		}
+
 		close(readingErrs)
 		close(linesRead)
+		defer file.Close()
+		defer unpacked.Close()
 	}()
 
 	return linesRead, readingErrs, nil
 }
 
-func parseTsvString(line string) (*AppInstalled, error) {
+func parseRecord(line string) (*AppInstalled, error) {
 	appInstalled := new(AppInstalled)
 	lineParts := strings.Split(line, "\t")
 
@@ -77,7 +71,8 @@ func parseTsvString(line string) (*AppInstalled, error) {
 
 	fieldsNumber := appInstalledValue.NumField()
 	if len(lineParts) != fieldsNumber {
-		return appInstalled, errors.New("File string has wrong format: can not parse it")
+		msg := fmt.Sprintf("Can not parse string: %s", line)
+		return appInstalled, errors.New(msg)
 	}
 
 	// TODO: parse it with assigning automatically
@@ -94,12 +89,54 @@ func parseTsvString(line string) (*AppInstalled, error) {
 	}
 	appInstalled.lon = lon
 
+	appsAsStrings := strings.Replace(lineParts[4], "\n", "", -1)
+	appsListAsStrings := strings.Split(appsAsStrings, ",")
+	var appsList []int
+	for _, appAsString := range appsListAsStrings {
+		appId, err := strconv.Atoi(appAsString)
+		appsList = append(appsList, appId)
+		if err != nil {
+			msg := fmt.Sprintf("Can not parse string with wrong App IDs: %s", line)
+			return appInstalled, errors.New(msg)
+		}
+	}
+	appInstalled.apps = appsList
+
 	return appInstalled, nil
 }
 
-func handleFile(filesNames []string) {
+func insertRecord(db_pool *pool.Pool, appInstalled *AppInstalled, dryRun bool) error {
+	conn, err := db_pool.Get()
+	if err != nil {
+		return err
+	}
+	defer db_pool.Put(conn)
+
+	if dryRun {
+		log.Printf("%+v\n", appInstalled)
+
+		// For testing DB interuction purposes
+		key := fmt.Sprintf("%s:%s", appInstalled.devType, appInstalled.devId)
+		resp := conn.Cmd("SET", key, appInstalled)
+		if resp.Err != nil {
+			log.Fatal(resp.Err)
+		}
+		respT1 := conn.Cmd("GET", key)
+		fmt.Println("Got from DB", respT1)
+		conn.Cmd("DEL", key)
+	} else {
+		key := fmt.Sprintf("%s:%s", appInstalled.devType, appInstalled.devId)
+		resp := conn.Cmd("SET", key, appInstalled)
+		if resp.Err != nil {
+			return resp.Err
+		}
+	}
+
+	return nil
+}
+
+func handleFile(dbPool *pool.Pool, filesNames []string, dryRun bool) {
 	for _, fileName := range filesNames {
-		fmt.Println("REDING", fileName)
 		lines, readingErrs, err := readFile(fileName)
 		if err != nil {
 			log.Fatal(err)
@@ -109,12 +146,15 @@ func handleFile(filesNames []string) {
 			select {
 			case line, ok := <-lines:
 				if ok {
-					fmt.Println(line)
-					//appInstalled, err := parseTsvString(line)
-					//if err != nil {
-					//	log.Fatal(err)
-					//}
-					//fmt.Printf("%+v\n", appInstalled)
+					appInstalled, err := parseRecord(line)
+					if err != nil {
+						log.Printf("Can not convert line into an inner entity %s: %s", fileName, err)
+					}
+
+					err = insertRecord(dbPool, appInstalled, dryRun)
+					if err != nil {
+						log.Printf("Can not save inner inner entity into DB: %s", err)
+					}
 				} else {
 					lines = nil
 				}
@@ -139,10 +179,15 @@ func main() {
 		log.Fatal(err)
 	}
 
-	handleFile(filesMatches)
+	dbPool, err := pool.New("tcp", "localhost:6379", 10)
+	if err != nil {
+		log.Panic(err)
+	}
+
+	dryRun := true
+	handleFile(dbPool, filesMatches, dryRun)
 }
 
-// Todo: Load it to Redis
 // Todo: Pass options to the script
 // Todo: Count errors while files processing
 // Todo: Implement reconnect / timeouts for Redis

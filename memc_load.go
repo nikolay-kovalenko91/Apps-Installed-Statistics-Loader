@@ -124,7 +124,7 @@ func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dry
 	if dryRun {
 		log.Printf("%s -> %s", key, strings.Replace(string(messagePacked), "\n", " ", -1))
 
-		// For testing DB interuction purposes
+		//For testing DB interuction purposes
 		//dbPool, ok := dbPools[appInstalled.devType]
 		//if !ok {
 		//	msg := fmt.Sprintf("Unknown device type: %s", appInstalled.devType)
@@ -139,6 +139,7 @@ func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dry
 		//
 		//resp := conn.Cmd("SET", key, messagePacked)
 		//if resp.Err != nil {
+		//	fmt.Println("SET err", key, messagePacked)
 		//	return resp.Err
 		//}
 		//fmt.Println("userApp is ", userApp)
@@ -237,10 +238,10 @@ func startLoading(filesPattern string, deviceIdVsMemcHost map[string]*string, is
 }
 
 func main() {
-	filesPattern := flag.String("pattern", "./sandbox/*.tsv.gz", "File pattern, a string")
+	filesPattern := flag.String("pattern", "./input_files/*.tsv.gz", "File pattern, a string")
 	isRunDry := flag.Bool("dry", true, "Run without saving to DB, a bool")
-
-	if logFilePath := flag.String("log", "", "Path to a log file, a string"); *logFilePath != "" {
+	logFilePath := flag.String("log", "", "Path to a log file, a string")
+	if *logFilePath != "" {
 		f, err := os.OpenFile(*logFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 		if err != nil {
 			log.Fatalf("error opening file: %v", err)
@@ -251,17 +252,19 @@ func main() {
 	}
 
 	deviceIdVsMemcHost := map[string]*string{
-		"idfa": flag.String("idfa", "127.0.0.1:33013", "IDFA device Memcached host, a string"),
-		"gaid": flag.String("gaid", "127.0.0.1:33014", "GAID device Memcached host, a string"),
-		"adid": flag.String("adid", "127.0.0.1:33015", "ADID device Memcached host, a string"),
-		"dvid": flag.String("dvid", "127.0.0.1:33016", "DVID device Memcached host, a string"),
+		"idfa": flag.String("idfa", "127.0.0.1:33013", "IDFA device DB host, a string"),
+		"gaid": flag.String("gaid", "127.0.0.1:33014", "GAID device DB host, a string"),
+		"adid": flag.String("adid", "127.0.0.1:33015", "ADID device DB host, a string"),
+		"dvid": flag.String("dvid", "127.0.0.1:33016", "DVID device DB host, a string"),
 	}
 
+	flag.Parse()
+
+	log.Println("Started...")
 	startLoading(*filesPattern, deviceIdVsMemcHost, *isRunDry)
+	log.Println("Done!")
 }
 
-// Todo: A few Memcacheds + Docker
 // Todo: Count errors while files processing
-
 // Todo: Implement reconnect / timeouts for Redis
 // Todo: Apply concurrency

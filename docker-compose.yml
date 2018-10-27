@@ -1,0 +1,19 @@
+version: '3'
+services:
+ memcloader:
+   build: .
+   # Connects a local dir with tsv files to import
+   volumes:
+    - ${INPUT_FILES_DIR}:/app_data/input_files
+
+ idfa_db:
+   image: redis
+
+ gaid_db:
+   image: redis
+
+ adid_db:
+   image: redis
+
+ dvid_db:
+   image: redis

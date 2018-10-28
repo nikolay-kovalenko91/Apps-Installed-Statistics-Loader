@@ -19,6 +19,7 @@ import (
 )
 
 const dbConnectionPoolSize = 15
+const normalErrorRate = 0.01
 
 type AppInstalled struct {
 	devType string
@@ -107,6 +108,16 @@ func parseRecord(line string) (*AppInstalled, error) {
 	return appInstalled, nil
 }
 
+func renameWithDot(filePath string) {
+	dir, fileName := filepath.Split(filePath)
+	newfileName := fmt.Sprintf(".%s", fileName)
+
+	err := os.Rename(filePath, filepath.Join(dir, newfileName))
+	if err != nil {
+		log.Fatalf("Can not rename file %s: %s", filePath, err)
+	}
+}
+
 func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dryRun bool) error {
 	userApp := appinstalled.UserApps{
 		Apps: appInstalled.apps,
@@ -124,7 +135,7 @@ func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dry
 	if dryRun {
 		log.Printf("%s -> %s", key, strings.Replace(string(messagePacked), "\n", " ", -1))
 
-		//For testing DB interuction purposes
+		//For testing DB interuction purposes TODO: delete it
 		//dbPool, ok := dbPools[appInstalled.devType]
 		//if !ok {
 		//	msg := fmt.Sprintf("Unknown device type: %s", appInstalled.devType)
@@ -176,30 +187,38 @@ func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dry
 	return nil
 }
 
-func handleFile(dbPools map[string]*pool.Pool, fileName string, dryRun bool) error {
-	lines, readingErrs, err := readFile(fileName)
+func handleFile(dbPools map[string]*pool.Pool, filePath string, dryRun bool) error {
+	lines, readingErrs, err := readFile(filePath)
 	if err != nil {
 		return err
 	}
+
+	var processed, processingErrors uint
 	for {
 		select {
 		case line, ok := <-lines:
 			if ok {
 				appInstalled, err := parseRecord(line)
 				if err != nil {
-					log.Printf("Can not convert line into an inner entity %s: %s", fileName, err)
+					log.Printf("Can not convert line into an inner entity %s: %s", filePath, err)
+					processingErrors++
+					continue
 				}
 
 				err = insertRecord(dbPools, appInstalled, dryRun)
 				if err != nil {
-					log.Printf("Can not save inner inner entity into DB: %s", err)
+					log.Printf("Can not save inner inner entity into DB: %s\n", err)
+					processingErrors++
 				}
+				processed++
+
 			} else {
 				lines = nil
 			}
 		case err, ok := <-readingErrs:
 			if ok {
-				log.Printf("Error reading file %s: %s", fileName, err)
+				log.Printf("Error reading file %s: %s\n", filePath, err)
+				processingErrors++
 			} else {
 				readingErrs = nil
 			}
@@ -209,6 +228,16 @@ func handleFile(dbPools map[string]*pool.Pool, fileName string, dryRun bool) err
 			break
 		}
 	}
+
+	if processed != 0 {
+		errRate := float32(processingErrors) / float32(processed)
+		if errRate < normalErrorRate {
+			log.Printf("Acceptable error rate (%.2f). Successfull load\n", errRate)
+		} else {
+			log.Printf("High error rate (%.2f > %.2f). Failed load\n", errRate, normalErrorRate)
+		}
+	}
+	renameWithDot(filePath)
 
 	return nil
 }
@@ -229,10 +258,14 @@ func startLoading(filesPattern string, deviceIdVsMemcHost map[string]*string, is
 		log.Fatal(err)
 	}
 
-	for _, fileName := range filesMatches {
-		err := handleFile(deviceIdVsMemcPool, fileName, isRunDry)
+	for _, path := range filesMatches {
+		if strings.HasPrefix(filepath.Base(path), ".") {
+			continue
+		}
+
+		err := handleFile(deviceIdVsMemcPool, path, isRunDry)
 		if err != nil {
-			log.Printf("Can not parse file %s: %s", fileName, err)
+			log.Printf("Can not parse file %s: %s\n", path, err)
 		}
 	}
 }
@@ -244,7 +277,7 @@ func main() {
 	if *logFilePath != "" {
 		f, err := os.OpenFile(*logFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 		if err != nil {
-			log.Fatalf("error opening file: %v", err)
+			log.Fatalf("error opening file: %v\n", err)
 		}
 		defer f.Close()
 
@@ -262,9 +295,8 @@ func main() {
 
 	log.Println("Started...")
 	startLoading(*filesPattern, deviceIdVsMemcHost, *isRunDry)
-	log.Println("Done!")
+	log.Println("Finished!")
 }
 
-// Todo: Count errors while files processing
 // Todo: Implement reconnect / timeouts for Redis
 // Todo: Apply concurrency

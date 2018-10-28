@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/golang/protobuf/proto"
 	"github.com/mediocregopher/radix.v2/pool"
+	"github.com/mediocregopher/radix.v2/redis"
 	"io"
 	"log"
 	"os"
@@ -16,10 +17,15 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const dbConnectionPoolSize = 15
 const normalErrorRate = 0.01
+
+const dbConnectionPoolSize = 15
+const dbConnectionTimeout = 2500 // milliseconds, 1s = 1000ms
+const dbConnectionMaxRetry = 5
+const dbConnectionRetryStartTimeout = 200 // milliseconds, 1s = 1000ms
 
 type AppInstalled struct {
 	devType string
@@ -81,6 +87,11 @@ func parseRecord(line string) (*AppInstalled, error) {
 
 	appInstalled.devType = lineParts[0]
 	appInstalled.devId = lineParts[1]
+	if appInstalled.devType == "" || appInstalled.devId == "" {
+		msg := fmt.Sprintf("Either devId or devType is empty: %s", line)
+		return appInstalled, errors.New(msg)
+	}
+
 	lat, err := strconv.ParseFloat(lineParts[2], 32)
 	if err != nil {
 		return appInstalled, err
@@ -118,6 +129,27 @@ func renameWithDot(filePath string) {
 	}
 }
 
+func applyCmdReconnect(f func(cmd string, args ...interface{}) *redis.Resp) func(cmd string, args ...interface{}) *redis.Resp {
+	return func(cmd string, args ...interface{}) *redis.Resp {
+		var retryCount uint
+		var resp *redis.Resp
+		timeout := dbConnectionRetryStartTimeout
+
+		for retryCount < dbConnectionMaxRetry {
+			resp = f(cmd, args)
+			if resp.Err == nil {
+				break
+			}
+
+			time.Sleep(time.Duration(timeout) * time.Millisecond)
+			timeout *= 2
+			retryCount++
+		}
+
+		return resp
+	}
+}
+
 func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dryRun bool) error {
 	userApp := appinstalled.UserApps{
 		Apps: appInstalled.apps,
@@ -134,37 +166,6 @@ func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dry
 
 	if dryRun {
 		log.Printf("%s -> %s", key, strings.Replace(string(messagePacked), "\n", " ", -1))
-
-		//For testing DB interuction purposes TODO: delete it
-		//dbPool, ok := dbPools[appInstalled.devType]
-		//if !ok {
-		//	msg := fmt.Sprintf("Unknown device type: %s", appInstalled.devType)
-		//	return errors.New(msg)
-		//}
-		//
-		//conn, err := dbPool.Get()
-		//if err != nil {
-		//	return err
-		//}
-		//defer dbPool.Put(conn)
-		//
-		//resp := conn.Cmd("SET", key, messagePacked)
-		//if resp.Err != nil {
-		//	fmt.Println("SET err", key, messagePacked)
-		//	return resp.Err
-		//}
-		//fmt.Println("userApp is ", userApp)
-		//fmt.Println("Packed is ", messagePacked)
-		//
-		//respT1 := conn.Cmd("GET", key)
-		//fmt.Println("Got from DB", respT1)
-		//conn.Cmd("DEL", key)
-		//userAppUnpacked := &appinstalled.UserApps{}
-		//respT1Bytes, _ := respT1.Bytes()
-		//if err := proto.Unmarshal(respT1Bytes, userAppUnpacked); err != nil {
-		//	return err
-		//}
-		//fmt.Println("userAppUnpacked is ", userAppUnpacked)
 	} else {
 		dbPool, ok := dbPools[appInstalled.devType]
 		if !ok {
@@ -178,10 +179,24 @@ func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dry
 		}
 		defer dbPool.Put(conn)
 
-		resp := conn.Cmd("SET", key, messagePacked)
+		resp := applyCmdReconnect(conn.Cmd)("SET", key, messagePacked)
 		if resp.Err != nil {
 			return resp.Err
 		}
+
+		//For testing DB interuction purposes TODO: delete it
+		//fmt.Println("userApp is ", userApp)
+		//fmt.Println("Packed is ", messagePacked)
+		//
+		//respT1 := conn.Cmd("GET", key)
+		//fmt.Println("Got from DB", respT1)
+		//conn.Cmd("DEL", key)
+		//userAppUnpacked := &appinstalled.UserApps{}
+		//respT1Bytes, _ := respT1.Bytes()
+		//if err := proto.Unmarshal(respT1Bytes, userAppUnpacked); err != nil {
+		//	fmt.Println("Unpack ", err)
+		//}
+		//fmt.Println("userAppUnpacked is ", userAppUnpacked)
 	}
 
 	return nil
@@ -242,15 +257,30 @@ func handleFile(dbPools map[string]*pool.Pool, filePath string, dryRun bool) err
 	return nil
 }
 
-func startLoading(filesPattern string, deviceIdVsMemcHost map[string]*string, isRunDry bool) {
-	deviceIdVsMemcPool := make(map[string]*pool.Pool)
-	for deviceId, memcHost := range deviceIdVsMemcHost {
-		dbPool, err := pool.New("tcp", *memcHost, dbConnectionPoolSize)
-		if err != nil {
-			log.Panic(err)
+func startLoading(filesPattern string, deviceIdVsDBHost map[string]*string, isRunDry bool) {
+	deviceIdVsDBPool := make(map[string]*pool.Pool)
+
+	for deviceId, host := range deviceIdVsDBHost {
+		var dbPool *pool.Pool
+
+		if !isRunDry {
+			dialFunc := func(network, addr string) (*redis.Client, error) {
+				client, err := redis.DialTimeout(network, addr, time.Duration(dbConnectionTimeout)*time.Millisecond)
+				if err != nil {
+					return nil, err
+				}
+
+				return client, nil
+			}
+
+			newDbPool, err := pool.NewCustom("tcp", *host, dbConnectionPoolSize, dialFunc)
+			if err != nil {
+				log.Panic(err)
+			}
+			dbPool = newDbPool
 		}
 
-		deviceIdVsMemcPool[deviceId] = dbPool
+		deviceIdVsDBPool[deviceId] = dbPool
 	}
 
 	filesMatches, err := filepath.Glob(filesPattern)
@@ -263,7 +293,7 @@ func startLoading(filesPattern string, deviceIdVsMemcHost map[string]*string, is
 			continue
 		}
 
-		err := handleFile(deviceIdVsMemcPool, path, isRunDry)
+		err := handleFile(deviceIdVsDBPool, path, isRunDry)
 		if err != nil {
 			log.Printf("Can not parse file %s: %s\n", path, err)
 		}
@@ -272,7 +302,7 @@ func startLoading(filesPattern string, deviceIdVsMemcHost map[string]*string, is
 
 func main() {
 	filesPattern := flag.String("pattern", "./input_files/*.tsv.gz", "File pattern, a string")
-	isRunDry := flag.Bool("dry", true, "Run without saving to DB, a bool")
+	isRunDry := flag.Bool("dry", false, "Run without saving to DB, a bool")
 	logFilePath := flag.String("log", "", "Path to a log file, a string")
 	if *logFilePath != "" {
 		f, err := os.OpenFile(*logFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
@@ -284,7 +314,7 @@ func main() {
 		log.SetOutput(f)
 	}
 
-	deviceIdVsMemcHost := map[string]*string{
+	deviceIdVsDBHost := map[string]*string{
 		"idfa": flag.String("idfa", "127.0.0.1:33013", "IDFA device DB host, a string"),
 		"gaid": flag.String("gaid", "127.0.0.1:33014", "GAID device DB host, a string"),
 		"adid": flag.String("adid", "127.0.0.1:33015", "ADID device DB host, a string"),
@@ -294,9 +324,8 @@ func main() {
 	flag.Parse()
 
 	log.Println("Started...")
-	startLoading(*filesPattern, deviceIdVsMemcHost, *isRunDry)
+	startLoading(*filesPattern, deviceIdVsDBHost, *isRunDry)
 	log.Println("Finished!")
 }
 
-// Todo: Implement reconnect / timeouts for Redis
 // Todo: Apply concurrency

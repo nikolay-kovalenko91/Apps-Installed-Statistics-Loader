@@ -15,4 +15,3 @@ Reads TSV files with app installed data and loads that into DB(Redis).
 ### Running App in Docker
 
 ```INPUT_FILES_DIR=<a dir with input files> docker-compose up --build```
-

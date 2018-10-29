@@ -3,7 +3,7 @@ Reads TSV files with app installed data and loads that into DB(Redis).
 
 ## Running App
 
-```$ go run memc_load.go``
+```$ go run memc_load.go```
 
 #### Running Options
 

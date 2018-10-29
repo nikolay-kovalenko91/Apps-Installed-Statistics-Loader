@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -35,13 +36,23 @@ type AppInstalled struct {
 	apps    []uint32
 }
 
+type Record struct {
+	key  string
+	body []byte
+}
+
+type Sender struct {
+	toSend     chan<- *Record
+	errsOutput <-chan error
+}
+
 func readFile(path string) (<-chan string, <-chan error, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// TODO: how to pass differnt unpackers as an argument?
+	// TODO: how to pass different unpackers as an argument?
 	unpacked, err := gzip.NewReader(file)
 	if err != nil {
 		return nil, nil, err
@@ -129,6 +140,7 @@ func renameWithDot(filePath string) {
 	}
 }
 
+// TODO: how to create a generic decorator for Pool/connect creation, not only Cmd func?
 func applyCmdReconnect(f func(cmd string, args ...interface{}) *redis.Resp) func(cmd string, args ...interface{}) *redis.Resp {
 	return func(cmd string, args ...interface{}) *redis.Resp {
 		var retryCount uint
@@ -150,7 +162,28 @@ func applyCmdReconnect(f func(cmd string, args ...interface{}) *redis.Resp) func
 	}
 }
 
-func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dryRun bool) error {
+func getRecordSender(pool *pool.Pool) *Sender {
+	toSend := make(chan *Record)
+	errsOutput := make(chan error)
+	sender := Sender{toSend: toSend, errsOutput: errsOutput}
+	go func() {
+		conn, err := pool.Get()
+		if err != nil {
+			errsOutput <- err
+		}
+		defer pool.Put(conn)
+
+		record := <-toSend
+		resp := applyCmdReconnect(conn.Cmd)("SET", record.key, record.body)
+		if resp.Err != nil {
+			errsOutput <- resp.Err
+		}
+	}()
+
+	return &sender
+}
+
+func composeRecord(appInstalled *AppInstalled) (*Record, error) {
 	userApp := appinstalled.UserApps{
 		Apps: appInstalled.apps,
 		Lat:  appInstalled.lat,
@@ -159,53 +192,71 @@ func insertRecord(dbPools map[string]*pool.Pool, appInstalled *AppInstalled, dry
 
 	messagePacked, err := proto.Marshal(&userApp)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	key := fmt.Sprintf("%s:%s", appInstalled.devType, appInstalled.devId)
 
-	if dryRun {
-		log.Printf("%s -> %s", key, strings.Replace(string(messagePacked), "\n", " ", -1))
-	} else {
-		dbPool, ok := dbPools[appInstalled.devType]
-		if !ok {
-			msg := fmt.Sprintf("Unknown device type: %s", appInstalled.devType)
-			return errors.New(msg)
-		}
+	record := Record{key: key, body: messagePacked}
 
-		conn, err := dbPool.Get()
-		if err != nil {
-			return err
-		}
-		defer dbPool.Put(conn)
+	return &record, nil
+}
 
-		resp := applyCmdReconnect(conn.Cmd)("SET", key, messagePacked)
-		if resp.Err != nil {
-			return resp.Err
-		}
-
-		//For testing DB interuction purposes TODO: delete it
-		//fmt.Println("userApp is ", userApp)
-		//fmt.Println("Packed is ", messagePacked)
-		//
-		//respT1 := conn.Cmd("GET", key)
-		//fmt.Println("Got from DB", respT1)
-		//conn.Cmd("DEL", key)
-		//userAppUnpacked := &appinstalled.UserApps{}
-		//respT1Bytes, _ := respT1.Bytes()
-		//if err := proto.Unmarshal(respT1Bytes, userAppUnpacked); err != nil {
-		//	fmt.Println("Unpack ", err)
-		//}
-		//fmt.Println("userAppUnpacked is ", userAppUnpacked)
+func insertRecord(sender *Sender, record *Record, isRunDry bool) error {
+	select {
+	case err := <-sender.errsOutput:
+		return err
+	case sender.toSend <- record:
 	}
 
 	return nil
 }
 
-func handleFile(dbPools map[string]*pool.Pool, filePath string, dryRun bool) error {
+func handleLine(line string, dbPools map[string]*pool.Pool, isRunDry bool) (processed, processingErrors uint) {
+	appInstalled, err := parseRecord(line)
+	if err != nil {
+		log.Printf("Can not convert line into an inner entity %s: %s", line, err)
+		processingErrors++
+		return processed, processingErrors
+	}
+
+	record, err := composeRecord(appInstalled)
+	if err != nil {
+		log.Printf("Can not compress line %s: %s", line, err)
+		processingErrors++
+		return processed, processingErrors
+	}
+
+	if isRunDry {
+		log.Printf("%s -> %s", record.key, strings.Replace(string(record.body), "\n", " ", -1))
+	} else {
+		dbPool, ok := dbPools[appInstalled.devType]
+		if !ok {
+			log.Printf("Unknown device type: %s", appInstalled.devType)
+			processingErrors++
+			return processed, processingErrors
+		}
+		sender := getRecordSender(dbPool)
+
+		err = insertRecord(sender, record, isRunDry)
+		if err != nil {
+			log.Printf("Error sending record: %s", err)
+			processingErrors++
+			return processed, processingErrors
+		}
+	}
+
+	processed++
+	return processed, processingErrors
+}
+
+func handleFile(waitGroup sync.WaitGroup, dbPools map[string]*pool.Pool, filePath string, isRunDry bool) {
+	defer waitGroup.Done()
+
 	lines, readingErrs, err := readFile(filePath)
 	if err != nil {
-		return err
+		log.Printf("Can not open file %s: %s\n", filePath, err)
+		return
 	}
 
 	var processed, processingErrors uint
@@ -213,20 +264,7 @@ func handleFile(dbPools map[string]*pool.Pool, filePath string, dryRun bool) err
 		select {
 		case line, ok := <-lines:
 			if ok {
-				appInstalled, err := parseRecord(line)
-				if err != nil {
-					log.Printf("Can not convert line into an inner entity %s: %s", filePath, err)
-					processingErrors++
-					continue
-				}
-
-				err = insertRecord(dbPools, appInstalled, dryRun)
-				if err != nil {
-					log.Printf("Can not save inner inner entity into DB: %s\n", err)
-					processingErrors++
-				}
-				processed++
-
+				processed, processingErrors = handleLine(line, dbPools, isRunDry)
 			} else {
 				lines = nil
 			}
@@ -252,9 +290,8 @@ func handleFile(dbPools map[string]*pool.Pool, filePath string, dryRun bool) err
 			log.Printf("High error rate (%.2f > %.2f). Failed load\n", errRate, normalErrorRate)
 		}
 	}
-	renameWithDot(filePath)
 
-	return nil
+	renameWithDot(filePath)
 }
 
 func startLoading(filesPattern string, deviceIdVsDBHost map[string]*string, isRunDry bool) {
@@ -288,16 +325,17 @@ func startLoading(filesPattern string, deviceIdVsDBHost map[string]*string, isRu
 		log.Fatal(err)
 	}
 
+	var waitGroup sync.WaitGroup
 	for _, path := range filesMatches {
 		if strings.HasPrefix(filepath.Base(path), ".") {
 			continue
 		}
 
-		err := handleFile(deviceIdVsDBPool, path, isRunDry)
-		if err != nil {
-			log.Printf("Can not parse file %s: %s\n", path, err)
-		}
+		waitGroup.Add(1)
+		go handleFile(waitGroup, deviceIdVsDBPool, path, isRunDry)
 	}
+
+	waitGroup.Wait()
 }
 
 func main() {
@@ -327,5 +365,3 @@ func main() {
 	startLoading(*filesPattern, deviceIdVsDBHost, *isRunDry)
 	log.Println("Finished!")
 }
-
-// Todo: Apply concurrency

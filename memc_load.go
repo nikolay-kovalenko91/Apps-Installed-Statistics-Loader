@@ -250,7 +250,7 @@ func handleLine(line string, dbPools map[string]*pool.Pool, isRunDry bool) (proc
 	return processed, processingErrors
 }
 
-func handleFile(waitGroup sync.WaitGroup, dbPools map[string]*pool.Pool, filePath string, isRunDry bool) {
+func handleFile(waitGroup *sync.WaitGroup, dbPools map[string]*pool.Pool, filePath string, isRunDry bool) {
 	defer waitGroup.Done()
 
 	lines, readingErrs, err := readFile(filePath)
@@ -332,7 +332,7 @@ func startLoading(filesPattern string, deviceIdVsDBHost map[string]*string, isRu
 		}
 
 		waitGroup.Add(1)
-		go handleFile(waitGroup, deviceIdVsDBPool, path, isRunDry)
+		go handleFile(&waitGroup, deviceIdVsDBPool, path, isRunDry)
 	}
 
 	waitGroup.Wait()

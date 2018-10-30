@@ -202,7 +202,7 @@ func composeRecord(appInstalled *AppInstalled) (*Record, error) {
 	return &record, nil
 }
 
-func insertRecord(sender *Sender, record *Record, isRunDry bool) error {
+func insertRecord(sender *Sender, record *Record) error {
 	select {
 	case err := <-sender.errsOutput:
 		return err
@@ -238,7 +238,7 @@ func handleLine(line string, dbPools map[string]*pool.Pool, isRunDry bool) (proc
 		}
 		sender := getRecordSender(dbPool)
 
-		err = insertRecord(sender, record, isRunDry)
+		err = insertRecord(sender, record)
 		if err != nil {
 			log.Printf("Error sending record: %s", err)
 			processingErrors++

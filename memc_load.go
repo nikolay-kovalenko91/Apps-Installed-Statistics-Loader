@@ -1,15 +1,11 @@
 package main
 
 import (
-	"./appinstalled"
 	"bufio"
 	"compress/gzip"
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/golang/protobuf/proto"
-	"github.com/mediocregopher/radix.v2/pool"
-	"github.com/mediocregopher/radix.v2/redis"
 	"io"
 	"log"
 	"os"
@@ -19,6 +15,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"./appinstalled"
+	"github.com/golang/protobuf/proto"
+	"github.com/mediocregopher/radix.v2/pool"
+	"github.com/mediocregopher/radix.v2/redis"
 )
 
 const normalErrorRate = 0.01
@@ -141,6 +142,7 @@ func renameWithDot(filePath string) {
 }
 
 // TODO: how to create a generic decorator for Pool/connect creation, not only Cmd func?
+// https://stackoverflow.com/questions/45395861/a-generic-golang-decorator-clarification-needed-for-a-gist
 func applyCmdReconnect(f func(cmd string, args ...interface{}) *redis.Resp) func(cmd string, args ...interface{}) *redis.Resp {
 	return func(cmd string, args ...interface{}) *redis.Resp {
 		var retryCount uint
@@ -365,3 +367,11 @@ func main() {
 	startLoading(*filesPattern, deviceIdVsDBHost, *isRunDry)
 	log.Println("Finished!")
 }
+
+// TODO: Parse config params in separate func
+// TODO: move dialFunc separately
+// TODO: get deviceIdVsDBPool separately
+// TODO: 262-283 to handleLines func
+// TODO: 231-248 to sendRecord func?
+// TODO: getRecordSender -> ExecuteCMD?; Record pack into Command struct
+// TODO: getRecordSender -> InsertRecord without channels; getRecordSender -> Insert

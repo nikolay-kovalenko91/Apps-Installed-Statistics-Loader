@@ -42,9 +42,40 @@ type Record struct {
 	body []byte
 }
 
-type Sender struct {
-	toSend     chan<- *Record
-	errsOutput <-chan error
+type StorePool struct {
+	dbPoolByDeviceId map[string]*pool.Pool
+}
+
+func (sp *StorePool) init(dbHostBydeviceId map[string]*string, poolSize int) error {
+	for deviceId, host := range dbHostBydeviceId {
+		dialFunc := func(network, addr string) (*redis.Client, error) {
+			client, err := redis.DialTimeout(network, addr, time.Duration(dbConnectionTimeout)*time.Millisecond)
+			if err != nil {
+				return nil, err
+			}
+
+			return client, nil
+		}
+
+		newDbPool, err := pool.NewCustom("tcp", *host, poolSize, dialFunc)
+		if err != nil {
+			return err
+		}
+
+		sp.dbPoolByDeviceId[deviceId] = newDbPool
+	}
+
+	return nil
+}
+
+func (sp *StorePool) getByDeviceId(deviceId string) (*pool.Pool, error) {
+	pool, ok := sp.dbPoolByDeviceId[deviceId]
+	if !ok {
+		err_message := fmt.Sprintf("Can't get pool for deviceId=%d", deviceId)
+		return nil, errors.New(err_message)
+	}
+
+	return pool, nil
 }
 
 func readFile(path string) (<-chan string, <-chan error, error) {
@@ -164,25 +195,23 @@ func applyCmdReconnect(f func(cmd string, args ...interface{}) *redis.Resp) func
 	}
 }
 
-func getRecordSender(pool *pool.Pool) *Sender {
-	toSend := make(chan *Record)
-	errsOutput := make(chan error)
-	sender := Sender{toSend: toSend, errsOutput: errsOutput}
-	go func() {
-		conn, err := pool.Get()
-		if err != nil {
-			errsOutput <- err
-		}
-		defer pool.Put(conn)
+func storeExecuteCmd(pool *pool.Pool, record *Record, command string) error {
+	conn, err := pool.Get()
+	if err != nil {
+		return err
+	}
+	defer pool.Put(conn)
 
-		record := <-toSend
-		resp := applyCmdReconnect(conn.Cmd)("SET", record.key, record.body)
-		if resp.Err != nil {
-			errsOutput <- resp.Err
-		}
-	}()
+	resp := applyCmdReconnect(conn.Cmd)(command, record.key, record.body)
+	if resp.Err != nil {
+		return resp.Err
+	}
 
-	return &sender
+	return nil
+}
+
+func insertRecord(pool *pool.Pool, record *Record) error {
+	return storeExecuteCmd(pool, record, "SET")
 }
 
 func composeRecord(appInstalled *AppInstalled) (*Record, error) {
@@ -202,16 +231,6 @@ func composeRecord(appInstalled *AppInstalled) (*Record, error) {
 	record := Record{key: key, body: messagePacked}
 
 	return &record, nil
-}
-
-func insertRecord(sender *Sender, record *Record) error {
-	select {
-	case err := <-sender.errsOutput:
-		return err
-	case sender.toSend <- record:
-	}
-
-	return nil
 }
 
 func handleLine(line string, dbPools map[string]*pool.Pool, isRunDry bool) (processed, processingErrors uint) {
@@ -238,9 +257,8 @@ func handleLine(line string, dbPools map[string]*pool.Pool, isRunDry bool) (proc
 			processingErrors++
 			return processed, processingErrors
 		}
-		sender := getRecordSender(dbPool)
 
-		err = insertRecord(sender, record)
+		err = insertRecord(dbPool, record)
 		if err != nil {
 			log.Printf("Error sending record: %s", err)
 			processingErrors++
@@ -373,5 +391,3 @@ func main() {
 // TODO: get deviceIdVsDBPool separately
 // TODO: 262-283 to handleLines func
 // TODO: 231-248 to sendRecord func?
-// TODO: getRecordSender -> ExecuteCMD?; Record pack into Command struct
-// TODO: getRecordSender -> InsertRecord without channels; getRecordSender -> Insert

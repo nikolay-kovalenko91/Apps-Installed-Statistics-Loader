@@ -22,7 +22,7 @@ import (
 	"github.com/mediocregopher/radix.v2/redis"
 )
 
-const second = 1000
+const second = 1000 // milliseconds
 
 const normalErrorRate = 0.01
 
@@ -48,19 +48,10 @@ type StoreConnPool struct {
 	connPoolByDeviceType map[string]*pool.Pool
 }
 
-func (sp *StoreConnPool) Init(storeHostByDevType map[string]*string, poolSize int, connTimeout int) error {
+func (sp *StoreConnPool) Init(storeHostByDevType map[string]*string, poolSize int, dialFunc pool.DialFunc) error {
 	sp.connPoolByDeviceType = make(map[string]*pool.Pool)
 
 	for devType, host := range storeHostByDevType {
-		dialFunc := func(network, addr string) (*redis.Client, error) {
-			client, err := redis.DialTimeout(network, addr, time.Duration(connTimeout)*time.Millisecond)
-			if err != nil {
-				return nil, err
-			}
-
-			return client, nil
-		}
-
 		newConnPool, err := pool.NewCustom("tcp", *host, poolSize, dialFunc)
 		if err != nil {
 			return err
@@ -88,7 +79,6 @@ func readFile(path string) (<-chan string, <-chan error, error) {
 		return nil, nil, err
 	}
 
-	// TODO: how to pass different unpackers as an argument?
 	unpacked, err := gzip.NewReader(file)
 	if err != nil {
 		return nil, nil, err
@@ -176,29 +166,6 @@ func renameWithDot(filePath string) {
 	}
 }
 
-// TODO: how to create a generic decorator for Pool/connect creation, not only Cmd func?
-// https://stackoverflow.com/questions/45395861/a-generic-golang-decorator-clarification-needed-for-a-gist
-func applyCmdReconnect(f func(cmd string, args ...interface{}) *redis.Resp) func(cmd string, args ...interface{}) *redis.Resp {
-	return func(cmd string, args ...interface{}) *redis.Resp {
-		var retryCount uint
-		var resp *redis.Resp
-		timeout := dbConnectionRetryStartTimeout
-
-		for retryCount < dbConnectionMaxRetry {
-			resp = f(cmd, args)
-			if resp.Err == nil {
-				break
-			}
-
-			time.Sleep(time.Duration(timeout) * time.Millisecond)
-			timeout *= 2
-			retryCount++
-		}
-
-		return resp
-	}
-}
-
 func storeExecuteCmd(pool *pool.Pool, record *Record, command string) error {
 	conn, err := pool.Get()
 	if err != nil {
@@ -206,7 +173,7 @@ func storeExecuteCmd(pool *pool.Pool, record *Record, command string) error {
 	}
 	defer pool.Put(conn)
 
-	resp := applyCmdReconnect(conn.Cmd)(command, record.key, record.body)
+	resp := conn.Cmd(command, record.key, record.body)
 	if resp.Err != nil {
 		return resp.Err
 	}
@@ -343,6 +310,40 @@ func startForMatched(filesPattern string, connPoolManager *StoreConnPool) {
 	waitGroup.Wait()
 }
 
+func applyReconnect(f pool.DialFunc) pool.DialFunc {
+	return func(network, addr string) (*redis.Client, error) {
+		var retryCount uint
+		var client *redis.Client
+		var err error
+		timeout := dbConnectionRetryStartTimeout
+
+		for retryCount < dbConnectionMaxRetry {
+			client, err = f(network, addr)
+			if err == nil {
+				break
+			}
+
+			log.Printf("Trying to reconnect, attempt=%d, err=%s", retryCount, err)
+
+			time.Sleep(time.Duration(timeout) * time.Millisecond)
+			timeout *= 2
+			retryCount++
+		}
+
+		return client, nil
+	}
+}
+
+func dial(network, addr string) (*redis.Client, error) {
+	timeout := time.Duration(dbConnectionTimeout) * time.Millisecond
+	client, err := redis.DialTimeout(network, addr, timeout)
+	if err != nil {
+		return nil, err
+	}
+
+	return client, nil
+}
+
 func main() {
 	filesPattern := flag.String("pattern", "./input_files/*.tsv.gz", "File pattern, a string")
 	isRunDry := flag.Bool("dry", false, "Run without saving to store, a bool")
@@ -366,20 +367,18 @@ func main() {
 
 	flag.Parse()
 
-	log.Println("Started...")
-
 	var connPoolManager *StoreConnPool
 	if !*isRunDry {
 		connPoolManager = new(StoreConnPool)
-		connPoolManager.Init(storeHostByDevType, dbConnectionPoolSize, dbConnectionTimeout)
+		connPoolManager.Init(storeHostByDevType, dbConnectionPoolSize, applyReconnect(dial))
 	}
 
+	log.Println("Started...")
 	startForMatched(*filesPattern, connPoolManager)
 
 	log.Println("Finished!")
 }
 
 // TODO: Parse config params in separate func
-// TODO: move dialFunc separately
 // TODO: 262-283 to handleLines func
 // TODO: 231-248 to sendRecord func?

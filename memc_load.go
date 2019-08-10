@@ -22,12 +22,14 @@ import (
 	"github.com/mediocregopher/radix.v2/redis"
 )
 
+const second = 1000
+
 const normalErrorRate = 0.01
 
 const dbConnectionPoolSize = 15
-const dbConnectionTimeout = 2500 // milliseconds, 1s = 1000ms
+const dbConnectionTimeout = 2.5 * second
 const dbConnectionMaxRetry = 5
-const dbConnectionRetryStartTimeout = 200 // milliseconds, 1s = 1000ms
+const dbConnectionRetryStartTimeout = 0.2 * second
 
 type AppInstalled struct {
 	devType string
@@ -42,14 +44,16 @@ type Record struct {
 	body []byte
 }
 
-type StorePool struct {
-	dbPoolByDeviceId map[string]*pool.Pool
+type StoreConnPool struct {
+	connPoolByDeviceType map[string]*pool.Pool
 }
 
-func (sp *StorePool) init(dbHostBydeviceId map[string]*string, poolSize int) error {
-	for deviceId, host := range dbHostBydeviceId {
+func (sp *StoreConnPool) Init(storeHostByDevType map[string]*string, poolSize int, connTimeout int) error {
+	sp.connPoolByDeviceType = make(map[string]*pool.Pool)
+
+	for devType, host := range storeHostByDevType {
 		dialFunc := func(network, addr string) (*redis.Client, error) {
-			client, err := redis.DialTimeout(network, addr, time.Duration(dbConnectionTimeout)*time.Millisecond)
+			client, err := redis.DialTimeout(network, addr, time.Duration(connTimeout)*time.Millisecond)
 			if err != nil {
 				return nil, err
 			}
@@ -57,21 +61,21 @@ func (sp *StorePool) init(dbHostBydeviceId map[string]*string, poolSize int) err
 			return client, nil
 		}
 
-		newDbPool, err := pool.NewCustom("tcp", *host, poolSize, dialFunc)
+		newConnPool, err := pool.NewCustom("tcp", *host, poolSize, dialFunc)
 		if err != nil {
 			return err
 		}
 
-		sp.dbPoolByDeviceId[deviceId] = newDbPool
+		sp.connPoolByDeviceType[devType] = newConnPool
 	}
 
 	return nil
 }
 
-func (sp *StorePool) getByDeviceId(deviceId string) (*pool.Pool, error) {
-	pool, ok := sp.dbPoolByDeviceId[deviceId]
+func (sp *StoreConnPool) GetByDeviceType(devType string) (*pool.Pool, error) {
+	pool, ok := sp.connPoolByDeviceType[devType]
 	if !ok {
-		err_message := fmt.Sprintf("Can't get pool for deviceId=%d", deviceId)
+		err_message := fmt.Sprintf("Can't get pool for deviceId=%d", devType)
 		return nil, errors.New(err_message)
 	}
 
@@ -233,11 +237,12 @@ func composeRecord(appInstalled *AppInstalled) (*Record, error) {
 	return &record, nil
 }
 
-func handleLine(line string, dbPools map[string]*pool.Pool, isRunDry bool) (processed, processingErrors uint) {
+func handleLine(line string, connPoolManager *StoreConnPool) (processed, processingErrors uint) {
 	appInstalled, err := parseRecord(line)
 	if err != nil {
 		log.Printf("Can not convert line into an inner entity %s: %s", line, err)
 		processingErrors++
+
 		return processed, processingErrors
 	}
 
@@ -245,37 +250,42 @@ func handleLine(line string, dbPools map[string]*pool.Pool, isRunDry bool) (proc
 	if err != nil {
 		log.Printf("Can not compress line %s: %s", line, err)
 		processingErrors++
+
 		return processed, processingErrors
 	}
 
-	if isRunDry {
-		log.Printf("%s -> %s", record.key, strings.Replace(string(record.body), "\n", " ", -1))
+	if connPoolManager == nil {
+		log.Printf("DryRun: %s -> %s", record.key, strings.Replace(string(record.body), "\n", " ", -1))
 	} else {
-		dbPool, ok := dbPools[appInstalled.devType]
-		if !ok {
+		connPool, err := connPoolManager.GetByDeviceType(appInstalled.devType)
+		if err != nil {
 			log.Printf("Unknown device type: %s", appInstalled.devType)
 			processingErrors++
+
 			return processed, processingErrors
 		}
 
-		err = insertRecord(dbPool, record)
+		err = insertRecord(connPool, record)
 		if err != nil {
 			log.Printf("Error sending record: %s", err)
 			processingErrors++
+
 			return processed, processingErrors
 		}
 	}
 
 	processed++
+
 	return processed, processingErrors
 }
 
-func handleFile(waitGroup *sync.WaitGroup, dbPools map[string]*pool.Pool, filePath string, isRunDry bool) {
+func handleFile(waitGroup *sync.WaitGroup, connPoolManager *StoreConnPool, filePath string) {
 	defer waitGroup.Done()
 
 	lines, readingErrs, err := readFile(filePath)
 	if err != nil {
 		log.Printf("Can not open file %s: %s\n", filePath, err)
+
 		return
 	}
 
@@ -284,7 +294,7 @@ func handleFile(waitGroup *sync.WaitGroup, dbPools map[string]*pool.Pool, filePa
 		select {
 		case line, ok := <-lines:
 			if ok {
-				processed, processingErrors = handleLine(line, dbPools, isRunDry)
+				processed, processingErrors = handleLine(line, connPoolManager)
 			} else {
 				lines = nil
 			}
@@ -314,32 +324,7 @@ func handleFile(waitGroup *sync.WaitGroup, dbPools map[string]*pool.Pool, filePa
 	renameWithDot(filePath)
 }
 
-func startLoading(filesPattern string, deviceIdVsDBHost map[string]*string, isRunDry bool) {
-	deviceIdVsDBPool := make(map[string]*pool.Pool)
-
-	for deviceId, host := range deviceIdVsDBHost {
-		var dbPool *pool.Pool
-
-		if !isRunDry {
-			dialFunc := func(network, addr string) (*redis.Client, error) {
-				client, err := redis.DialTimeout(network, addr, time.Duration(dbConnectionTimeout)*time.Millisecond)
-				if err != nil {
-					return nil, err
-				}
-
-				return client, nil
-			}
-
-			newDbPool, err := pool.NewCustom("tcp", *host, dbConnectionPoolSize, dialFunc)
-			if err != nil {
-				log.Panic(err)
-			}
-			dbPool = newDbPool
-		}
-
-		deviceIdVsDBPool[deviceId] = dbPool
-	}
-
+func startForMatched(filesPattern string, connPoolManager *StoreConnPool) {
 	filesMatches, err := filepath.Glob(filesPattern)
 	if err != nil {
 		log.Fatal(err)
@@ -352,7 +337,7 @@ func startLoading(filesPattern string, deviceIdVsDBHost map[string]*string, isRu
 		}
 
 		waitGroup.Add(1)
-		go handleFile(&waitGroup, deviceIdVsDBPool, path, isRunDry)
+		go handleFile(&waitGroup, connPoolManager, path)
 	}
 
 	waitGroup.Wait()
@@ -360,7 +345,7 @@ func startLoading(filesPattern string, deviceIdVsDBHost map[string]*string, isRu
 
 func main() {
 	filesPattern := flag.String("pattern", "./input_files/*.tsv.gz", "File pattern, a string")
-	isRunDry := flag.Bool("dry", false, "Run without saving to DB, a bool")
+	isRunDry := flag.Bool("dry", false, "Run without saving to store, a bool")
 	logFilePath := flag.String("log", "", "Path to a log file, a string")
 	if *logFilePath != "" {
 		f, err := os.OpenFile(*logFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
@@ -372,22 +357,29 @@ func main() {
 		log.SetOutput(f)
 	}
 
-	deviceIdVsDBHost := map[string]*string{
-		"idfa": flag.String("idfa", "127.0.0.1:33013", "IDFA device DB host, a string"),
-		"gaid": flag.String("gaid", "127.0.0.1:33014", "GAID device DB host, a string"),
-		"adid": flag.String("adid", "127.0.0.1:33015", "ADID device DB host, a string"),
-		"dvid": flag.String("dvid", "127.0.0.1:33016", "DVID device DB host, a string"),
+	storeHostByDevType := map[string]*string{
+		"idfa": flag.String("idfa", "127.0.0.1:33013", "IDFA device store host, a string"),
+		"gaid": flag.String("gaid", "127.0.0.1:33014", "GAID device store host, a string"),
+		"adid": flag.String("adid", "127.0.0.1:33015", "ADID device store host, a string"),
+		"dvid": flag.String("dvid", "127.0.0.1:33016", "DVID device store host, a string"),
 	}
 
 	flag.Parse()
 
 	log.Println("Started...")
-	startLoading(*filesPattern, deviceIdVsDBHost, *isRunDry)
+
+	var connPoolManager *StoreConnPool
+	if !*isRunDry {
+		connPoolManager = new(StoreConnPool)
+		connPoolManager.Init(storeHostByDevType, dbConnectionPoolSize, dbConnectionTimeout)
+	}
+
+	startForMatched(*filesPattern, connPoolManager)
+
 	log.Println("Finished!")
 }
 
 // TODO: Parse config params in separate func
 // TODO: move dialFunc separately
-// TODO: get deviceIdVsDBPool separately
 // TODO: 262-283 to handleLines func
 // TODO: 231-248 to sendRecord func?

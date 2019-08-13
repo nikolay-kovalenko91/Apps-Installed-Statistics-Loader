@@ -31,6 +31,13 @@ const dbConnectionTimeout = 2.5 * second
 const dbConnectionMaxRetry = 5
 const dbConnectionRetryStartTimeout = 0.2 * second
 
+type Config struct {
+	FilesPattern       string
+	LogFilePath        string
+	IsRunDry           bool
+	StoreHostByDevType map[string]*string
+}
+
 type AppInstalled struct {
 	devType string
 	devId   string
@@ -204,7 +211,7 @@ func composeRecord(appInstalled *AppInstalled) (*Record, error) {
 	return &record, nil
 }
 
-func handleLine(line string, connPoolManager *StoreConnPool) (processed, processingErrors uint) {
+func processeLine(line string, connPoolManager *StoreConnPool) (processed, processingErrors uint) {
 	appInstalled, err := parseRecord(line)
 	if err != nil {
 		log.Printf("Can not convert line into an inner entity %s: %s", line, err)
@@ -246,7 +253,7 @@ func handleLine(line string, connPoolManager *StoreConnPool) (processed, process
 	return processed, processingErrors
 }
 
-func handleFile(waitGroup *sync.WaitGroup, connPoolManager *StoreConnPool, filePath string) {
+func processFile(waitGroup *sync.WaitGroup, connPoolManager *StoreConnPool, filePath string) {
 	defer waitGroup.Done()
 
 	lines, readingErrs, err := readFile(filePath)
@@ -261,7 +268,7 @@ func handleFile(waitGroup *sync.WaitGroup, connPoolManager *StoreConnPool, fileP
 		select {
 		case line, ok := <-lines:
 			if ok {
-				processed, processingErrors = handleLine(line, connPoolManager)
+				processed, processingErrors = processeLine(line, connPoolManager)
 			} else {
 				lines = nil
 			}
@@ -291,7 +298,7 @@ func handleFile(waitGroup *sync.WaitGroup, connPoolManager *StoreConnPool, fileP
 	renameWithDot(filePath)
 }
 
-func startForMatched(filesPattern string, connPoolManager *StoreConnPool) {
+func processFilesMatched(filesPattern string, connPoolManager *StoreConnPool) {
 	filesMatches, err := filepath.Glob(filesPattern)
 	if err != nil {
 		log.Fatal(err)
@@ -304,7 +311,7 @@ func startForMatched(filesPattern string, connPoolManager *StoreConnPool) {
 		}
 
 		waitGroup.Add(1)
-		go handleFile(&waitGroup, connPoolManager, path)
+		go processFile(&waitGroup, connPoolManager, path)
 	}
 
 	waitGroup.Wait()
@@ -344,41 +351,56 @@ func dial(network, addr string) (*redis.Client, error) {
 	return client, nil
 }
 
-func main() {
-	filesPattern := flag.String("pattern", "./input_files/*.tsv.gz", "File pattern, a string")
-	isRunDry := flag.Bool("dry", false, "Run without saving to store, a bool")
-	logFilePath := flag.String("log", "", "Path to a log file, a string")
-	if *logFilePath != "" {
-		f, err := os.OpenFile(*logFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+func processFlags(args []string) *Config {
+	flagSet := flag.NewFlagSet(args[0], flag.ExitOnError)
+
+	var cfg Config
+
+	flagSet.StringVar(&cfg.FilesPattern, "pattern", "./input_files/*.tsv.gz", "File pattern, a string")
+	flagSet.BoolVar(&cfg.IsRunDry, "dry", false, "Run without saving to store, a bool")
+	flagSet.StringVar(&cfg.LogFilePath, "log", "", "Path to a log file, a string")
+
+	cfg.StoreHostByDevType = map[string]*string{
+		"idfa": flagSet.String("idfa", "127.0.0.1:33013", "IDFA device store host, a string"),
+		"gaid": flagSet.String("gaid", "127.0.0.1:33014", "GAID device store host, a string"),
+		"adid": flagSet.String("adid", "127.0.0.1:33015", "ADID device store host, a string"),
+		"dvid": flagSet.String("dvid", "127.0.0.1:33016", "DVID device store host, a string"),
+	}
+
+	flagSet.Parse(args[1:])
+
+	return &cfg
+}
+
+func runLoader(cfg *Config) {
+	if cfg.LogFilePath != "" {
+		f, err := os.OpenFile(cfg.LogFilePath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
 		if err != nil {
-			log.Fatalf("error opening file: %v\n", err)
+			log.Fatalf("Error opening file: %v\n", err)
 		}
 		defer f.Close()
 
 		log.SetOutput(f)
 	}
 
-	storeHostByDevType := map[string]*string{
-		"idfa": flag.String("idfa", "127.0.0.1:33013", "IDFA device store host, a string"),
-		"gaid": flag.String("gaid", "127.0.0.1:33014", "GAID device store host, a string"),
-		"adid": flag.String("adid", "127.0.0.1:33015", "ADID device store host, a string"),
-		"dvid": flag.String("dvid", "127.0.0.1:33016", "DVID device store host, a string"),
-	}
-
-	flag.Parse()
-
 	var connPoolManager *StoreConnPool
-	if !*isRunDry {
+	if !cfg.IsRunDry {
 		connPoolManager = new(StoreConnPool)
-		connPoolManager.Init(storeHostByDevType, dbConnectionPoolSize, applyReconnect(dial))
+		connPoolManager.Init(cfg.StoreHostByDevType, dbConnectionPoolSize, applyReconnect(dial))
 	}
 
 	log.Println("Started...")
-	startForMatched(*filesPattern, connPoolManager)
+
+	processFilesMatched(cfg.FilesPattern, connPoolManager)
 
 	log.Println("Finished!")
 }
 
-// TODO: Parse config params in separate func
+func main() {
+	cfg := processFlags(os.Args)
+
+	runLoader(cfg)
+}
+
 // TODO: 262-283 to handleLines func
 // TODO: 231-248 to sendRecord func?

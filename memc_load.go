@@ -39,16 +39,16 @@ type Config struct {
 }
 
 type AppInstalled struct {
-	devType string
-	devId   string
-	lat     float64
-	lon     float64
-	apps    []uint32
+	DevType string
+	DevId   string
+	Lat     float64
+	Lon     float64
+	Apps    []uint32
 }
 
 type Record struct {
-	key  string
-	body []byte
+	Key  string
+	Body []byte
 }
 
 type StoreConnPool struct {
@@ -73,8 +73,8 @@ func (sp *StoreConnPool) Init(storeHostByDevType map[string]*string, poolSize in
 func (sp *StoreConnPool) GetByDeviceType(devType string) (*pool.Pool, error) {
 	pool, ok := sp.connPoolByDeviceType[devType]
 	if !ok {
-		err_message := fmt.Sprintf("Can't get pool for deviceId=%d", devType)
-		return nil, errors.New(err_message)
+		errMessage := fmt.Sprintf("Can't get pool for deviceId=%d", devType)
+		return nil, errors.New(errMessage)
 	}
 
 	return pool, nil
@@ -129,9 +129,9 @@ func parseRecord(line string) (*AppInstalled, error) {
 		return appInstalled, errors.New(msg)
 	}
 
-	appInstalled.devType = lineParts[0]
-	appInstalled.devId = lineParts[1]
-	if appInstalled.devType == "" || appInstalled.devId == "" {
+	appInstalled.DevType = lineParts[0]
+	appInstalled.DevId = lineParts[1]
+	if appInstalled.DevType == "" || appInstalled.DevId == "" {
 		msg := fmt.Sprintf("Either devId or devType is empty: %s", line)
 		return appInstalled, errors.New(msg)
 	}
@@ -140,25 +140,25 @@ func parseRecord(line string) (*AppInstalled, error) {
 	if err != nil {
 		return appInstalled, err
 	}
-	appInstalled.lat = lat
+	appInstalled.Lat = lat
 	lon, err := strconv.ParseFloat(lineParts[3], 32)
 	if err != nil {
 		return appInstalled, err
 	}
-	appInstalled.lon = lon
+	appInstalled.Lon = lon
 
 	appsAsStrings := strings.Replace(lineParts[4], "\n", "", -1)
 	appsListAsStrings := strings.Split(appsAsStrings, ",")
 	var appsList []uint32
 	for _, appAsString := range appsListAsStrings {
-		appId, err := strconv.Atoi(appAsString)
-		appsList = append(appsList, uint32(appId))
+		appID, err := strconv.Atoi(appAsString)
+		appsList = append(appsList, uint32(appID))
 		if err != nil {
 			msg := fmt.Sprintf("Can not parse string with wrong App IDs: %s", line)
 			return appInstalled, errors.New(msg)
 		}
 	}
-	appInstalled.apps = appsList
+	appInstalled.Apps = appsList
 
 	return appInstalled, nil
 }
@@ -180,7 +180,7 @@ func storeExecuteCmd(pool *pool.Pool, record *Record, command string) error {
 	}
 	defer pool.Put(conn)
 
-	resp := conn.Cmd(command, record.key, record.body)
+	resp := conn.Cmd(command, record.Key, record.Body)
 	if resp.Err != nil {
 		return resp.Err
 	}
@@ -188,15 +188,38 @@ func storeExecuteCmd(pool *pool.Pool, record *Record, command string) error {
 	return nil
 }
 
-func insertRecord(pool *pool.Pool, record *Record) error {
+func storeExecuteSet(pool *pool.Pool, record *Record) error {
 	return storeExecuteCmd(pool, record, "SET")
+}
+
+func saveRecord(connPoolManager *StoreConnPool, devType string, record *Record) error {
+	if connPoolManager == nil {
+		log.Printf("DryRun: %s -> %s", record.Key, strings.Replace(string(record.Body), "\n", " ", -1))
+
+	} else {
+		connPool, err := connPoolManager.GetByDeviceType(devType)
+		if err != nil {
+			errMessage := fmt.Sprintf("Unknown device type: %s", devType)
+
+			return errors.New(errMessage)
+		}
+
+		err = storeExecuteSet(connPool, record)
+		if err != nil {
+			errMessage := fmt.Sprintf("Error sending record: %s", err)
+
+			return errors.New(errMessage)
+		}
+	}
+
+	return nil
 }
 
 func composeRecord(appInstalled *AppInstalled) (*Record, error) {
 	userApp := appinstalled.UserApps{
-		Apps: appInstalled.apps,
-		Lat:  appInstalled.lat,
-		Lon:  appInstalled.lon,
+		Apps: appInstalled.Apps,
+		Lat:  appInstalled.Lat,
+		Lon:  appInstalled.Lon,
 	}
 
 	messagePacked, err := proto.Marshal(&userApp)
@@ -204,53 +227,34 @@ func composeRecord(appInstalled *AppInstalled) (*Record, error) {
 		return nil, err
 	}
 
-	key := fmt.Sprintf("%s:%s", appInstalled.devType, appInstalled.devId)
+	key := fmt.Sprintf("%s:%s", appInstalled.DevType, appInstalled.DevId)
 
-	record := Record{key: key, body: messagePacked}
+	record := Record{Key: key, Body: messagePacked}
 
 	return &record, nil
 }
 
-func processeLine(line string, connPoolManager *StoreConnPool) (processed, processingErrors uint) {
+func processLine(line string, connPoolManager *StoreConnPool) error {
 	appInstalled, err := parseRecord(line)
 	if err != nil {
-		log.Printf("Can not convert line into an inner entity %s: %s", line, err)
-		processingErrors++
+		errMessage := fmt.Sprintf("Can not convert line into an inner entity %s: %s", line, err)
 
-		return processed, processingErrors
+		return errors.New(errMessage)
 	}
 
 	record, err := composeRecord(appInstalled)
 	if err != nil {
-		log.Printf("Can not compress line %s: %s", line, err)
-		processingErrors++
+		errMessage := fmt.Sprintf("Can not compress line %s: %s", line, err)
 
-		return processed, processingErrors
+		return errors.New(errMessage)
 	}
 
-	if connPoolManager == nil {
-		log.Printf("DryRun: %s -> %s", record.key, strings.Replace(string(record.body), "\n", " ", -1))
-	} else {
-		connPool, err := connPoolManager.GetByDeviceType(appInstalled.devType)
-		if err != nil {
-			log.Printf("Unknown device type: %s", appInstalled.devType)
-			processingErrors++
-
-			return processed, processingErrors
-		}
-
-		err = insertRecord(connPool, record)
-		if err != nil {
-			log.Printf("Error sending record: %s", err)
-			processingErrors++
-
-			return processed, processingErrors
-		}
+	err = saveRecord(connPoolManager, appInstalled.DevType, record)
+	if err != nil {
+		return err
 	}
 
-	processed++
-
-	return processed, processingErrors
+	return nil
 }
 
 func processLines(lines <-chan string, readingErrs <-chan error, connPoolManager *StoreConnPool) (uint, uint) {
@@ -259,7 +263,12 @@ func processLines(lines <-chan string, readingErrs <-chan error, connPoolManager
 		select {
 		case line, ok := <-lines:
 			if ok {
-				processed, processingErrors = processeLine(line, connPoolManager)
+				err := processLine(line, connPoolManager)
+				if err != nil {
+					processingErrors++
+
+					log.Printf("Error sending line: error=%s; line=%s\n", err, line)
+				}
 			} else {
 				lines = nil
 			}
@@ -268,7 +277,7 @@ func processLines(lines <-chan string, readingErrs <-chan error, connPoolManager
 			if ok {
 				processingErrors++
 
-				log.Printf("Error reading file: %s\n", err)
+				log.Printf("File reading error: %s\n", err)
 			} else {
 				readingErrs = nil
 			}
@@ -409,5 +418,3 @@ func main() {
 
 	runLoader(cfg)
 }
-
-// TODO: 231-248 to sendRecord func?

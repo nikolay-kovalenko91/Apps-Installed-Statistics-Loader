@@ -253,6 +253,35 @@ func processeLine(line string, connPoolManager *StoreConnPool) (processed, proce
 	return processed, processingErrors
 }
 
+func processLines(lines <-chan string, readingErrs <-chan error, connPoolManager *StoreConnPool) (uint, uint) {
+	var processed, processingErrors uint
+	for {
+		select {
+		case line, ok := <-lines:
+			if ok {
+				processed, processingErrors = processeLine(line, connPoolManager)
+			} else {
+				lines = nil
+			}
+
+		case err, ok := <-readingErrs:
+			if ok {
+				processingErrors++
+
+				log.Printf("Error reading file: %s\n", err)
+			} else {
+				readingErrs = nil
+			}
+		}
+
+		if lines == nil && readingErrs == nil {
+			break
+		}
+	}
+
+	return processed, processingErrors
+}
+
 func processFile(waitGroup *sync.WaitGroup, connPoolManager *StoreConnPool, filePath string) {
 	defer waitGroup.Done()
 
@@ -263,28 +292,7 @@ func processFile(waitGroup *sync.WaitGroup, connPoolManager *StoreConnPool, file
 		return
 	}
 
-	var processed, processingErrors uint
-	for {
-		select {
-		case line, ok := <-lines:
-			if ok {
-				processed, processingErrors = processeLine(line, connPoolManager)
-			} else {
-				lines = nil
-			}
-		case err, ok := <-readingErrs:
-			if ok {
-				log.Printf("Error reading file %s: %s\n", filePath, err)
-				processingErrors++
-			} else {
-				readingErrs = nil
-			}
-		}
-
-		if lines == nil && readingErrs == nil {
-			break
-		}
-	}
+	processed, processingErrors := processLines(lines, readingErrs, connPoolManager)
 
 	if processed != 0 {
 		errRate := float32(processingErrors) / float32(processed)
@@ -402,5 +410,4 @@ func main() {
 	runLoader(cfg)
 }
 
-// TODO: 262-283 to handleLines func
 // TODO: 231-248 to sendRecord func?

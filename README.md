@@ -3,11 +3,13 @@ What it does?
 1) Parses tracker-service logs containing statistics about mobile phone apps installed by some users
 2) Translates the log record into Protobuf message and loads it into Redis store
 
+[A Logs file example here](https://cloud.mail.ru/public/LoDo/SfsPEzoGc)
+
 ## Running App
 
-```$ go run loader.go```
+```$ go run loader.go <flags>```
 
-#### Running Options
+#### Running Options(flags)
 
 1) ```-log```: a file path to write the app logs in
 2) ```-dry```: fake loading - does not save data into the store

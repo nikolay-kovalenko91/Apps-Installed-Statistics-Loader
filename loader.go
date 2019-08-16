@@ -5,8 +5,8 @@ import (
 	"log"
 	"os"
 
-	"./processing"
-	"./store"
+	"github.com/nikolay-kovalenko91/Apps-Installed-Statistics-Loader/processing"
+	"github.com/nikolay-kovalenko91/Apps-Installed-Statistics-Loader/store"
 )
 
 func processFlags(args []string) *processing.Config {

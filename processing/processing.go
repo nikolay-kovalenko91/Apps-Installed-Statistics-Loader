@@ -14,9 +14,9 @@ import (
 	"strings"
 	"sync"
 
-	"../appinstalled"
-	"../store"
 	"github.com/golang/protobuf/proto"
+	"github.com/nikolay-kovalenko91/Apps-Installed-Statistics-Loader/appinstalled"
+	"github.com/nikolay-kovalenko91/Apps-Installed-Statistics-Loader/store"
 )
 
 const normalErrorRate = 0.01

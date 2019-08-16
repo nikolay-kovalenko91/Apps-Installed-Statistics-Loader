@@ -1,17 +1,19 @@
-# Apps Installed Loader
-Reads TSV files with app installed data and loads that into DB(Redis). 
+# Apps Installed Statistics Loader
+What it does?
+1) Parses tracker-service logs containing statistics about mobile phone apps installed by some users
+2) Translates the log record into Protobuf message and loads it into Redis store
 
 ## Running App
 
-```$ go run memc_load.go```
+```$ go run loader.go```
 
 #### Running Options
 
-1) ```-log```: a path to log file
-2) ```-dry```: fake loading to DB
-3) ```-pattern``` : TSV files pattern. ```./input_files/*.tsv.gz``` by default.
-4) ```-idfa ,-gaid, -adid, -dvid```: DB servers hosts.`
+1) ```-log```: a file path to write the app logs in
+2) ```-dry```: fake loading - does not save data into the store
+3) ```-pattern``` : parsing logs files pattern. ```./input_files/*.tsv.gz``` by default.
+4) ```-idfa ,-gaid, -adid, -dvid```: Redis servers hosts`
 
 ### Running App in Docker
 
-```INPUT_FILES_DIR=<a dir with input files> docker-compose up --build```
+```INPUT_FILES_DIR=<a dir with log files> docker-compose up --build```

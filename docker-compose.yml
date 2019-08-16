@@ -1,8 +1,8 @@
 version: '3'
 services:
- memcloader:
+ loader:
    build: .
-   # Connects a local dir with tsv files to import
+   # Connects a local dir with log files to load
    volumes:
     - ${INPUT_FILES_DIR}:/app_data/input_files
 

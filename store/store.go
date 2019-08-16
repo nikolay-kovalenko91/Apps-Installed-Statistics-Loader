@@ -11,12 +11,10 @@ import (
 	"github.com/mediocregopher/radix.v2/redis"
 )
 
-const second = 1000 // milliseconds
-
 const dbConnectionPoolSize = 15
-const dbConnectionTimeout = 2.5 * second
+const dbConnectionTimeout = time.Duration(3) * time.Second
 const dbConnectionMaxRetry = 5
-const dbConnectionRetryStartTimeout = 0.2 * second
+const dbConnectionRetryStartTimeout = time.Duration(200) * time.Millisecond
 
 // Record represents a raw data to save onto store
 type Record struct {
@@ -61,7 +59,7 @@ func applyReconnect(f pool.DialFunc) pool.DialFunc {
 
 			log.Printf("Trying to reconnect, attempt=%d, err=%s", retryCount, err)
 
-			time.Sleep(time.Duration(timeout) * time.Millisecond)
+			time.Sleep(timeout)
 			timeout *= 2
 			retryCount++
 		}
@@ -71,8 +69,7 @@ func applyReconnect(f pool.DialFunc) pool.DialFunc {
 }
 
 func dial(network, addr string) (*redis.Client, error) {
-	timeout := time.Duration(dbConnectionTimeout) * time.Millisecond
-	client, err := redis.DialTimeout(network, addr, timeout)
+	client, err := redis.DialTimeout(network, addr, dbConnectionTimeout)
 	if err != nil {
 		return nil, err
 	}

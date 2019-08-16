@@ -107,7 +107,8 @@ func parseRecord(line string) (*AppInstalled, error) {
 
 	appsAsStrings := strings.Replace(lineParts[4], "\n", "", -1)
 	appsListAsStrings := strings.Split(appsAsStrings, ",")
-	var appsList []uint32
+
+	appsList := make([]uint32, len(appsListAsStrings))
 	for _, appAsString := range appsListAsStrings {
 		appID, err := strconv.Atoi(appAsString)
 		appsList = append(appsList, uint32(appID))

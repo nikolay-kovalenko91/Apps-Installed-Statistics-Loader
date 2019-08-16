@@ -18,4 +18,4 @@ What it does?
 
 ### Running App in Docker
 
-```INPUT_FILES_DIR=<a dir with log files> docker-compose up --build```
+```INPUT_FILES_DIR=<a dir with log files> docker-compose up```
